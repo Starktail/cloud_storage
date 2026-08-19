@@ -353,3 +353,52 @@ def test_migration_command(mocked_s3_client, example_file_record_6):
 	assert (
 		s3_file_size == original_file_size
 	), f"File size mismatch: local={original_file_size}, s3={s3_file_size}"
+
+
+def test_unique_url_appends_fid_to_existing_query_string():
+	"""Private cloud storage URLs already have a query string, fid must join with "&".
+
+	Core File.unique_url always uses "?", which produces
+	/api/method/retrieve?key=folder/x.png?fid=<name> and makes retrieve() read
+	"folder/x.png?fid=<name>" as the s3_key, throwing DoesNotExistError. This is
+	the path pasted images in comments and emails take via
+	frappe.core.doctype.file.utils.extract_images_from_html.
+	"""
+	frappe.set_user("Administrator")
+
+	private_file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "pasted.png",
+			"file_url": "/api/method/retrieve?key=test_folder/pasted.png",
+			"is_private": 1,
+		}
+	)
+	private_file.name = "test-unique-url-private"
+	assert (
+		private_file.unique_url
+		== "/api/method/retrieve?key=test_folder/pasted.png&fid=test-unique-url-private"
+	)
+
+	public_file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "pasted.png",
+			"file_url": "/api/method/retrieve?key=test_folder/pasted.png",
+			"is_private": 0,
+		}
+	)
+	public_file.name = "test-unique-url-public"
+	assert public_file.unique_url == "/api/method/retrieve?key=test_folder/pasted.png"
+
+	# files stored locally keep the core behavior
+	local_file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "pasted.png",
+			"file_url": "/private/files/pasted.png",
+			"is_private": 1,
+		}
+	)
+	local_file.name = "test-unique-url-local"
+	assert local_file.unique_url == "/private/files/pasted.png?fid=test-unique-url-local"
