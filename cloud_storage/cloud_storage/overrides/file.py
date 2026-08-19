@@ -46,6 +46,28 @@ class CloudStorageFile(File):
 			return self.file_url.startswith(URL_PREFIXES)  # type: ignore
 		return not self.content
 
+	@property
+	def unique_url(self) -> str:
+		"""
+		HASH: 69a495579a729909f4df7a45855165eee4a208f4
+		REPO: https://github.com/frappe/frappe
+		PATH: frappe/core/doctype/file/file.py
+		METHOD: unique_url
+
+		Cloud storage file URLs already carry a query string
+		(/api/method/retrieve?key=...), so the fid parameter has to be appended
+		with "&". Core assumes a plain path and always uses "?", which corrupts
+		the key parameter and makes retrieve() return a 404.
+		"""
+		from urllib.parse import urlencode
+
+		file_url = self.file_url or ""
+		if not self.is_private:
+			return file_url
+
+		separator = "&" if "?" in file_url else "?"
+		return file_url + separator + urlencode({"fid": self.name})
+
 	def validate(self) -> None:
 		"""
 		HASH: 69a495579a729909f4df7a45855165eee4a208f4
