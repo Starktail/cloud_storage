@@ -149,6 +149,9 @@ class CloudStorageFile(File):
 				if s3_key_from_url and not existing_s3_key:
 					frappe.db.set_value("File", associated_doc, "s3_key", s3_key_from_url)
 
+			if associated_doc and associated_doc != self.name:
+				self.point_at_surviving_file(associated_doc)
+
 		elif self.attached_to_doctype and self.attached_to_name and self.file_name:  # type: ignore
 			associated_doc = frappe.db.get_value(
 				"File",
@@ -201,6 +204,17 @@ class CloudStorageFile(File):
 					).insert(ignore_permissions=True)
 
 				frappe.delete_doc("File", self.name, ignore_permissions=True)
+				self.point_at_surviving_file(associated_doc)
+
+	def point_at_surviving_file(self, surviving_name: str) -> None:
+		"""Repoint this document at the file it was just merged into
+		"""
+		surviving = frappe.db.get_value(
+			"File", surviving_name, ["file_url", "s3_key"], as_dict=True
+		)
+		if surviving:
+			self.file_url = surviving.file_url
+			self.s3_key = surviving.s3_key
 
 	def on_trash(self) -> None:
 		"""

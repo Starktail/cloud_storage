@@ -402,3 +402,51 @@ def test_unique_url_appends_fid_to_existing_query_string():
 	)
 	local_file.name = "test-unique-url-local"
 	assert local_file.unique_url == "/private/files/pasted.png?fid=test-unique-url-local"
+
+
+def test_duplicate_content_url_points_at_surviving_file(mocked_s3_client):
+	"""Pasting an image whose content already exists must yield a key that is in the bucket.
+
+	The duplicate File is deleted during its own insert by the dedup merge in after_insert,
+	and write_file() never uploads it because it short-circuits on the content hash conflict.
+	frappe.core.doctype.file.utils.extract_images_from_html reads file_url/unique_url off that
+	document afterwards to build the img src, so it has to name the surviving object.
+	"""
+	from PIL import Image
+
+	frappe.set_user("Administrator")
+
+	# an image unique to this test, so the first paste is genuinely new no matter what the
+	# rest of the suite has already uploaded
+	buffer = BytesIO()
+	Image.new("RGB", (7, 11), (13, 57, 199)).save(buffer, format="PNG")
+	content = buffer.getvalue()
+
+	def paste(file_name, attached_to_name):
+		doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": file_name,
+				"attached_to_doctype": "User",
+				"attached_to_name": attached_to_name,
+				"content": content,
+				"decode": False,
+				"is_private": 1,
+			}
+		)
+		doc.save(ignore_permissions=True)
+		return doc
+
+	first = paste("dup-paste-first.png", "Administrator")
+	assert frappe.db.exists("File", first.name)
+
+	second = paste("dup-paste-second.png", "Guest")
+
+	# the duplicate is merged into the existing file and deleted during its own insert
+	assert not frappe.db.exists("File", second.name)
+
+	# ...but the URL it hands back must still resolve
+	assert "?key=" in second.file_url
+	key = second.file_url.split("?key=")[1]
+	assert frappe.db.exists("File", {"s3_key": key})
+	assert second.unique_url == f"{second.file_url}&fid={second.name}"
