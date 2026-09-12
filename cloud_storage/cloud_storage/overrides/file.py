@@ -68,13 +68,34 @@ class CloudStorageFile(File):
 		separator = "&" if "?" in file_url else "?"
 		return file_url + separator + urlencode({"fid": self.name})
 
+	def validate_file_path(self, path=None):
+		"""
+		HASH: 48366c6ecbad44ed24e6d02bdd8f8f189ce58927
+		REPO: https://github.com/frappe/frappe
+		PATH: frappe/core/doctype/file/file.py
+		METHOD: validate_file_path
+		"""
+		if path is None:
+			if self.is_remote_file:
+				return
+			path = self.get_full_path()
+		base_path = os.path.realpath(get_files_path(is_private=self.is_private))
+		resolved_path = os.path.realpath(path)
+		if os.path.commonpath((base_path, resolved_path)) != base_path:
+			frappe.throw(_("The File URL you've entered is incorrect"), title=_("Invalid File URL"))
+
 	def validate(self) -> None:
 		"""
-		HASH: 69a495579a729909f4df7a45855165eee4a208f4
+		HASH: ca4a6912ebf7a8dafa9e56822bd304fa38c4da09
 		REPO: https://github.com/frappe/frappe
 		PATH: frappe/core/doctype/file/file.py
 		METHOD: validate
 		"""
+		if self.is_folder:
+			if self.file_url:
+				frappe.throw(_("A folder cannot have a File URL"))
+			return
+
 		# guard against recursion: associate_files() can save another File, re-entering validate
 		if not self.flags.associating_files:
 			self.associate_files()
@@ -127,6 +148,7 @@ class CloudStorageFile(File):
 			if associated_doc and associated_doc != self.name:
 				# Extract s3_key from file_url before clearing it; clearing prevents the
 				# delete_file hook from removing the remote object when this duplicate is deleted.
+				original_file_url = self.file_url
 				if "?key=" in (self.file_url or ""):
 					s3_key_from_url = self.file_url.split("?key=")[1]
 				elif "key=" in (self.file_url or ""):
@@ -142,6 +164,9 @@ class CloudStorageFile(File):
 					ignore_permissions=True,
 					# validate=False,
 				)
+				# Restore file_url in memory only (DB stays empty). upload_file returns this
+				# doc; an Attach field reads attachment.file_url, so a blank will leave it empty.
+				self.file_url = original_file_url
 			if associated_doc and not self.s3_key:
 				# Only write s3_key onto the existing file when we extracted a valid key from
 				# this duplicate's URL and the existing file does not already have one.
@@ -344,7 +369,7 @@ class CloudStorageFile(File):
 	@frappe.whitelist()
 	def get_content(self) -> bytes:
 		"""
-		HASH: bfbebb3d3d9c26eb34ed447112fcd46f1dadff00
+		HASH: 48366c6ecbad44ed24e6d02bdd8f8f189ce58927
 		REPO: https://github.com/frappe/frappe
 		PATH: frappe/core/doctype/file/file.py
 		METHOD: get_content
@@ -352,6 +377,7 @@ class CloudStorageFile(File):
 		if self.is_folder:
 			frappe.throw(_("Cannot get file contents of a Folder"))
 
+		self.validate_file_path()
 		if self.get("content"):
 			self._content = self.content
 			if self.decode:  # type: ignore
@@ -374,6 +400,7 @@ class CloudStorageFile(File):
 				file_path = frappe.get_site_path("public", "files", self.file_name)
 			else:
 				file_path = frappe.get_site_path("private", "files", self.file_name)
+			self.validate_file_path(file_path)
 			with open(file_path, mode="rb") as f:
 				self._content = f.read()
 				try:
