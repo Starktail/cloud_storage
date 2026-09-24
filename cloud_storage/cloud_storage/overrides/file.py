@@ -232,14 +232,22 @@ class CloudStorageFile(File):
 				self.point_at_surviving_file(associated_doc)
 
 	def point_at_surviving_file(self, surviving_name: str) -> None:
-		"""Repoint this document at the file it was just merged into
+		"""Repoint this document at the file it was just merged into.
 		"""
 		surviving = frappe.db.get_value(
 			"File", surviving_name, ["file_url", "s3_key"], as_dict=True
 		)
-		if surviving:
-			self.file_url = surviving.file_url
-			self.s3_key = surviving.s3_key
+		if not surviving:
+			return
+
+		merged_name = (self.doctype, self.name)
+		self.name = surviving_name
+		self.file_url = surviving.file_url
+		self.s3_key = surviving.s3_key
+
+		if merged_name in frappe.flags.currently_saving:
+			frappe.flags.currently_saving.remove(merged_name)
+			frappe.flags.currently_saving.append((self.doctype, self.name))
 
 	def on_trash(self) -> None:
 		"""
