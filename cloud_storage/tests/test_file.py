@@ -160,7 +160,7 @@ def test_upload_file_with_multiple_association(example_file_record_1):
 
 	_file.load_from_db()
 	assert frappe.db.exists("File", _file.name) is not None
-	assert frappe.db.exists("File", file.name) is None
+	assert file.name == _file.name
 	assert len(_file.file_association) >= 2
 	assert _file.file_association[0].link_doctype == "User"
 	assert _file.file_association[0].link_name == "Administrator"
@@ -228,7 +228,7 @@ def test_file_versioning_with_content_change(mocked_s3_client, example_file_reco
 		file2 = create_upload_file(modified_csv, file_name="sample.csv")
 		file1.load_from_db()
 
-		assert not frappe.db.exists("File", file2.name)
+		assert file2.name == file1.name
 		assert file1.content_hash == file2.content_hash
 		assert file1.content_hash != original_content_hash
 		assert len(file1.versions) >= 2
@@ -255,8 +255,8 @@ def test_file_versioning_different_documents(mocked_s3_client, example_file_reco
 		)
 		file1.load_from_db()
 
-		# No duplicate record should exist
-		assert not frappe.db.exists("File", file2.name)
+		# No duplicate record should exist: the second upload points at the first
+		assert file2.name == file1.name
 		# Existing record must keep its s3_key
 		assert file1.s3_key is not None
 		# Both documents should be associated
@@ -336,7 +336,6 @@ def test_associate_files_no_duplicate_association():
 	doc = frappe.get_doc("File", file_a.name)
 	doc.associate_files("Module Def", "Cloud Storage")
 	doc.associate_files("Module Def", "Cloud Storage")
-
 
 	file_b = frappe.get_doc("File", "test-assoc-guard-b")
 	matching = [
@@ -487,11 +486,13 @@ def test_duplicate_content_url_points_at_surviving_file(mocked_s3_client):
 
 	second = paste("dup-paste-second.png", "Guest")
 
-	# the duplicate is merged into the existing file and deleted during its own insert
-	assert not frappe.db.exists("File", second.name)
+	# the duplicate is merged into the existing file and deleted during its own insert,
+	# so the document has to come back pointing at the survivor
+	assert second.name == first.name
+	assert frappe.db.exists("File", second.name)
 
-	# ...but the URL it hands back must still resolve
+	# ...and the URL it hands back must still resolve
 	assert "?key=" in second.file_url
 	key = second.file_url.split("?key=")[1]
 	assert frappe.db.exists("File", {"s3_key": key})
-	assert second.unique_url == f"{second.file_url}&fid={second.name}"
+	assert second.unique_url == f"{second.file_url}&fid={first.name}"
