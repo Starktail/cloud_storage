@@ -32,6 +32,8 @@ from werkzeug.datastructures import FileStorage
 FILE_URL = "/api/method/retrieve?key={path}"
 URL_PREFIXES = ("http://", "https://", "/api/method/retrieve")
 
+LOCAL_ONLY_DOCTYPES = ("Data Import", "Repost Item Valuation")
+
 
 class CloudStorageFile(File):
 	@File.is_remote_file.getter
@@ -716,7 +718,7 @@ def write_file(file: File, remove_spaces_in_file_name: bool = True) -> File:
 		file.save_file_on_filesystem()
 		return file
 
-	if file.attached_to_doctype == "Data Import":
+	if file.attached_to_doctype in LOCAL_ONLY_DOCTYPES:
 		file.save_file_on_filesystem()
 		return file
 
@@ -767,6 +769,11 @@ def delete_file(file: File, **kwargs) -> File:
 		return file
 
 	if file.is_folder:
+		return file
+
+	# files kept on disk (see LOCAL_ONLY_DOCTYPES) have nothing in the bucket to delete
+	if file.file_url and not file.is_remote_file:
+		file.delete_file_from_filesystem()
 		return file
 
 	if file.file_url and "?key=" in file.file_url:
