@@ -10,7 +10,13 @@ import pytest
 from moto import mock_s3
 from werkzeug.datastructures import FileMultiDict
 
-from cloud_storage.cloud_storage.overrides.file import CloudStorageFile, retrieve
+from cloud_storage.cloud_storage.overrides.file import (
+	LOCAL_ONLY_DOCTYPES,
+	CloudStorageFile,
+	delete_file,
+	retrieve,
+	write_file,
+)
 from cloud_storage.migration import migrate_files
 
 
@@ -496,3 +502,44 @@ def test_duplicate_content_url_points_at_surviving_file(mocked_s3_client):
 	key = second.file_url.split("?key=")[1]
 	assert frappe.db.exists("File", {"s3_key": key})
 	assert second.unique_url == f"{second.file_url}&fid={first.name}"
+
+
+@pytest.mark.parametrize("doctype", LOCAL_ONLY_DOCTYPES)
+def test_local_only_doctype_file_stays_on_filesystem(doctype):
+	"""
+	Files attached to LOCAL_ONLY_DOCTYPES must bypass S3 entirely: core code (e.g. ERPNext's
+	create_json_gz_file for Repost Item Valuation) rewrites them in place via
+	get_full_path() + open(), which crashes with FileNotFoundError on a retrieve URL.
+	"""
+	frappe.set_user("Administrator")
+	file = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{frappe.scrub(doctype)}-test.json.gz",
+			"attached_to_doctype": doctype,
+			"attached_to_name": "TEST-0001",
+			"attached_to_field": "reposting_data_file",
+			"is_private": 1,
+		}
+	)
+	file._content = b"\x1f\x8b" + b"x" * 32
+
+	with patch("cloud_storage.cloud_storage.overrides.file.get_cloud_storage_client") as client:
+		result = write_file(file)
+
+	client.assert_not_called()
+	assert result.file_url.startswith("/private/files/")
+	assert not result.is_remote_file
+
+	# get_full_path() must be a real path that core can reopen for writing on the next step
+	path = result.get_full_path()
+	assert Path(path).is_file()
+	with open(path, "wb") as f:
+		f.write(b"rewritten")
+	assert Path(path).read_bytes() == b"rewritten"
+
+	# the delete hook must clean the local file instead of trying to delete a bucket object
+	with patch("cloud_storage.cloud_storage.overrides.file.get_cloud_storage_client") as client:
+		delete_file(result)
+	client.assert_not_called()
+	assert not Path(path).exists()
