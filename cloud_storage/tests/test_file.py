@@ -543,3 +543,43 @@ def test_local_only_doctype_file_stays_on_filesystem(doctype):
 		delete_file(result)
 	client.assert_not_called()
 	assert not Path(path).exists()
+
+
+def upload_without_document(file_name, content):
+	files = FileMultiDict()
+	files.add_file("file", BytesIO(content), file_name)
+	frappe.set_user("Administrator")
+	frappe.local.request = frappe._dict(method="POST", files=files)
+	frappe.local.form_dict = frappe._dict(is_private=1, folder="Home")
+	return frappe.call("frappe.handler.upload_file")
+
+
+@pytest.mark.parametrize("content_changed", [False, True])
+def test_unattached_reupload_returns_surviving_file(mocked_s3_client, content_changed):
+	"""Uploading a file without a document whose name or content already exists must return a usable file_url.
+
+	write_file() stores such an upload on the existing File (a new version, or nothing for identical
+	content) and leaves the new record without file_url. A client that uploads first and then sets
+	an Attach field from the response (upload_file, then POST /api/resource) got an empty file_url
+	and a MandatoryError on the Attach field.
+	"""
+	with patch(
+		"cloud_storage.cloud_storage.overrides.file.get_cloud_storage_client",
+		return_value=mocked_s3_client,
+	):
+		token = frappe.generate_hash(length=8)
+		file_name = f"unattached-{token}.jsonl"
+		content = f"session {token}\n".encode()
+		first = upload_without_document(file_name, content)
+		assert "?key=" in first.file_url
+
+		second = upload_without_document(
+			file_name, content + b"more rows\n" if content_changed else content
+		)
+
+		assert second.name == first.name
+		assert second.file_url == first.file_url
+		assert frappe.get_all("File", filters={"file_name": file_name}, pluck="name") == [first.name]
+		mocked_s3_client.head_object(
+			Bucket=mocked_s3_client.bucket, Key=second.file_url.split("?key=")[1]
+		)

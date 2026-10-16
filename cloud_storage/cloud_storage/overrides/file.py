@@ -233,12 +233,27 @@ class CloudStorageFile(File):
 				frappe.delete_doc("File", self.name, ignore_permissions=True)
 				self.point_at_surviving_file(associated_doc)
 
+		elif not self.attached_to_doctype and not self.file_url and not self.is_folder:  # type: ignore
+			# Upload without a document: write_file found a File with the same content or name and
+			# stored the upload there as a new version, this record stays without file_url.
+			# Drop it and return the surviving file, otherwise upload_file hands out a blank
+			# file_url and an Attach field set from it stays empty.
+			associated_doc = frappe.db.get_value(
+				"File",
+				{"content_hash": self.content_hash, "name": ["!=", self.name], "is_folder": False},  # type: ignore
+				"name",
+			) or frappe.db.get_value(
+				"File",
+				{"file_name": self.file_name, "name": ["!=", self.name], "is_folder": False},  # type: ignore
+				"name",
+			)
+			if associated_doc:
+				frappe.delete_doc("File", self.name, ignore_permissions=True)
+				self.point_at_surviving_file(associated_doc)
+
 	def point_at_surviving_file(self, surviving_name: str) -> None:
-		"""Repoint this document at the file it was just merged into.
-		"""
-		surviving = frappe.db.get_value(
-			"File", surviving_name, ["file_url", "s3_key"], as_dict=True
-		)
+		"""Repoint this document at the file it was just merged into."""
+		surviving = frappe.db.get_value("File", surviving_name, ["file_url", "s3_key"], as_dict=True)
 		if not surviving:
 			return
 
