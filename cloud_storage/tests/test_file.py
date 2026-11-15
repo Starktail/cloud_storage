@@ -543,3 +543,124 @@ def test_local_only_doctype_file_stays_on_filesystem(doctype):
 		delete_file(result)
 	client.assert_not_called()
 	assert not Path(path).exists()
+
+
+def _raw_association(parent, link_doctype, link_name, idx):
+	"""Insert a File Association row directly so a dead link survives link validation."""
+	row = frappe.get_doc(
+		{
+			"doctype": "File Association",
+			"parent": parent,
+			"parenttype": "File",
+			"parentfield": "file_association",
+			"idx": idx,
+			"link_doctype": link_doctype,
+			"link_name": link_name,
+		}
+	)
+	row.name = frappe.generate_hash(length=10)
+	row.db_insert()
+
+
+@mock_s3
+def test_associate_files_drops_dead_association_on_merged_file():
+	"""A stale File Association row on the deduplicated File must not block its nested save.
+
+	Reproduces 'Could not find Row #N: Document Name: ...' raised on every save of a
+	document whose Attach Image url was copied from an Item.
+	"""
+	frappe.set_user("Administrator")
+	content_hash = "deadrowhashdeadrowhashdeadrow001"
+	file_a = raw_file("test-dead-row-a", content_hash)
+	file_b = raw_file("test-dead-row-b", content_hash)
+	_raw_association(file_b.name, "Module Def", "no-longer-exists", idx=1)
+	_raw_association(file_b.name, "Module Def", "Automation", idx=2)
+
+	doc = frappe.get_doc("File", file_a.name)
+	doc.associate_files("Module Def", "Cloud Storage")  # raised LinkValidationError before
+
+	file_b = frappe.get_doc("File", "test-dead-row-b")
+	links = [(a.idx, a.link_doctype, a.link_name) for a in file_b.file_association]
+	assert links == [(1, "Module Def", "Automation"), (2, "Module Def", "Cloud Storage")]
+
+
+def test_get_content_reads_bucket_copy_when_local_file_is_gone(mocked_s3_client):
+	"""An Attach url still pointing at /private/files must read the blob from the bucket."""
+	frappe.set_user("Administrator")
+	key = "test_folder/Item/TEST/bucket-only.png"
+	mocked_s3_client.put_object(Bucket=mocked_s3_client.bucket, Key=key, Body=b"\x89PNG-from-bucket")
+	survivor = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "bucket-only.png",
+			"file_url": "/private/files/bucket-only.png",
+			"s3_key": key,
+			"content_hash": "bucketonlyhashbucketonlyhash0001",
+			"attached_to_doctype": "User",
+			"attached_to_name": "Administrator",
+			"is_private": 1,
+			"is_folder": 0,
+		}
+	)
+	survivor.name = "test-bucket-only"
+	survivor.db_insert()
+
+	copy = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "bucket-only.png",
+			"file_url": "/private/files/bucket-only.png",
+			"attached_to_doctype": "Module Def",
+			"attached_to_name": "Cloud Storage",
+			"is_private": 1,
+		}
+	)
+	orphan = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "never-uploaded.png",
+			"file_url": "/private/files/never-uploaded.png",
+			"is_private": 1,
+		}
+	)
+	with patch(
+		"cloud_storage.cloud_storage.overrides.file.get_cloud_storage_client",
+		return_value=mocked_s3_client,
+	):
+		assert copy.get_content() == b"\x89PNG-from-bucket"
+		with pytest.raises(FileNotFoundError):
+			orphan.get_content()
+
+
+def test_attach_hook_treats_file_association_as_attached():
+	"""Core's attach hook must not recreate a File whose content is linked by association."""
+	from frappe.core.doctype.file import utils as file_utils
+
+	from cloud_storage import is_attached_through_association, patched_attach_files_to_document
+
+	assert file_utils.attach_files_to_document is patched_attach_files_to_document
+
+	frappe.set_user("Administrator")
+	content_hash = "assoclinkedhashassoclinkedhash01"
+	survivor = raw_file("test-assoc-linked", content_hash)
+	local_copy = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": "linked.png",
+			"file_url": "/private/files/linked.png",
+			"content_hash": content_hash,
+			"attached_to_doctype": "User",
+			"attached_to_name": "Administrator",
+			"is_private": 1,
+			"is_folder": 0,
+		}
+	)
+	local_copy.name = "test-assoc-linked-local"
+	local_copy.db_insert()
+	_raw_association(survivor.name, "Module Def", "Cloud Storage", idx=1)
+
+	linked = frappe.get_doc("Module Def", "Cloud Storage")
+	other = frappe.get_doc("Module Def", "Automation")
+	assert is_attached_through_association(linked, "/private/files/linked.png")
+	assert not is_attached_through_association(linked, "/private/files/other.png")
+	assert not is_attached_through_association(other, "/private/files/linked.png")

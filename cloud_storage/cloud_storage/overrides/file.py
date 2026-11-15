@@ -286,6 +286,7 @@ class CloudStorageFile(File):
 
 		if not attached_to_doctype:
 			return
+		self.drop_dead_associations()
 		if not self.file_url:  # type: ignore
 			client = get_cloud_storage_client()
 			path = get_file_path(self, client.folder)
@@ -310,6 +311,7 @@ class CloudStorageFile(File):
 					"file_association",
 					add_child_file_association(attached_to_doctype, attached_to_name),
 				)
+			existing_file.drop_dead_associations()
 			existing_file.flags.associating_files = True
 			existing_file.save()
 		else:
@@ -328,6 +330,25 @@ class CloudStorageFile(File):
 					"file_association",
 					add_child_file_association(attached_to_doctype, attached_to_name),
 				)
+
+	def drop_dead_associations(self) -> list[str]:
+		"""Remove File Association rows whose linked document no longer exists.
+		"""
+		known_doctypes = {}
+		dead = []
+		for row in self.file_association:
+			if row.link_doctype not in known_doctypes:
+				known_doctypes[row.link_doctype] = frappe.db.exists("DocType", row.link_doctype)
+			if not known_doctypes[row.link_doctype]:
+				dead.append(row)
+			elif not (row.link_name and frappe.db.exists(row.link_doctype, row.link_name)):
+				dead.append(row)
+		for row in dead:
+			self.remove(row)
+		if dead:
+			for idx, row in enumerate(self.file_association, start=1):
+				row.idx = idx
+		return [row.name for row in dead]
 
 	def add_file_version(self, version_id):
 		self.append(
@@ -374,6 +395,7 @@ class CloudStorageFile(File):
 			self.remove(row)
 		for idx, association in enumerate(self.file_association, start=1):
 			association.idx = idx
+		self.drop_dead_associations()
 		self.save()
 
 	@frappe.whitelist()
@@ -411,15 +433,49 @@ class CloudStorageFile(File):
 			else:
 				file_path = frappe.get_site_path("private", "files", self.file_name)
 			self.validate_file_path(file_path)
-			with open(file_path, mode="rb") as f:
-				self._content = f.read()
-				try:
-					# for plain text files
-					self._content = self._content.decode()
-				except UnicodeDecodeError:
-					# for .png, .jpg, etc
-					pass
+			if os.path.exists(file_path):
+				with open(file_path, mode="rb") as f:
+					self._content = f.read()
+			else:
+				self._content = self.get_content_from_bucket_copy(file_path)
+			try:
+				# for plain text files
+				self._content = self._content.decode()
+			except UnicodeDecodeError:
+				# for .png, .jpg, etc
+				pass
 		return self._content
+
+	def get_content_from_bucket_copy(self, file_path: str) -> bytes:
+		"""Read the blob of a File that shares this file_url but already lives in the bucket.
+		"""
+		s3_key = self.find_bucket_key_for_file_url()
+		if not s3_key:
+			raise FileNotFoundError(file_path)
+		client = get_cloud_storage_client()
+		file_object = client.get_object(Bucket=client.bucket, Key=s3_key)
+		return file_object.get("Body").read()
+
+	def find_bucket_key_for_file_url(self) -> str | None:
+		"""s3_key of any File with this file_url, or of a File sharing its content hash."""
+		if not self.file_url:
+			return None
+		siblings = frappe.get_all(
+			"File",
+			filters={"file_url": self.file_url, "name": ["!=", self.name or ""], "is_folder": 0},
+			fields=["s3_key", "content_hash"],
+		)
+		for sibling in siblings:
+			if sibling.s3_key:
+				return sibling.s3_key
+		hashes = [sibling.content_hash for sibling in siblings if sibling.content_hash]
+		if not hashes:
+			return None
+		return frappe.db.get_value(
+			"File",
+			{"content_hash": ["in", hashes], "s3_key": ["is", "set"], "is_folder": 0},
+			"s3_key",
+		)
 
 	def get_full_path(self):
 		"""
