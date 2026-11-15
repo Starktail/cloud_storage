@@ -10,7 +10,9 @@ import frappe
 import frappe.desk.form.load
 from frappe.core.doctype.communication.communication import Communication
 from frappe.core.doctype.file import file as file_module
+from frappe.core.doctype.file import utils as file_utils
 from frappe.query_builder import DocType
+from frappe.utils import cint
 
 import cloud_storage.permissions  # noqa: F401 — must load before silencing stock File list hook
 
@@ -98,3 +100,107 @@ def patched_communication_get_attachments(self):
 
 frappe.desk.form.load._get_communications = patched_get_communications
 Communication.get_attachments = patched_communication_get_attachments
+
+
+def is_attached_through_association(doc, file_url):
+	"""True when the content behind `file_url` is already linked to `doc` by a File Association.
+
+	The deduplicated File keeps only one `file_url`, so core's lookup by url plus
+	`attached_to_*` never matches the other documents sharing the blob.
+	"""
+	hashes = frappe.get_all(
+		"File",
+		filters={"file_url": file_url, "content_hash": ["is", "set"], "is_folder": 0},
+		pluck="content_hash",
+		distinct=True,
+	)
+	if not hashes:
+		return False
+
+	File = DocType("File")
+	FileAssociation = DocType("File Association")
+	linked = (
+		frappe.qb.from_(FileAssociation)
+		.inner_join(File)
+		.on(File.name == FileAssociation.parent)
+		.select(FileAssociation.name)
+		.where(FileAssociation.link_doctype == doc.doctype)
+		.where(FileAssociation.link_name == doc.name)
+		.where(File.content_hash.isin(hashes))
+		.limit(1)
+	).run()
+	return bool(linked)
+
+
+def patched_attach_files_to_document(doc, event) -> None:
+	"""
+	HASH: 48366c6ecbad44ed24e6d02bdd8f8f189ce58927
+	REPO: https://github.com/frappe/frappe
+	PATH: frappe/core/doctype/file/utils.py
+	METHOD: attach_files_to_document
+
+	Core recreates a File for an Attach field whenever no File with the same url is
+	attached to the document. With deduplication the surviving File carries a different
+	url, so every save of a BOM or Work Order whose image came from the Item would retry
+	the insert and log "Error Attaching File". Treat a File Association as attached.
+	"""
+	attach_fields = doc.meta.get("fields", {"fieldtype": ["in", ["Attach", "Attach Image"]]})
+
+	for df in attach_fields:
+		value = doc.get(df.fieldname)
+		if not (value or "").startswith(("/files", "/private/files", "http://", "https://")):
+			continue
+
+		if frappe.db.exists(
+			"File",
+			{
+				"file_url": value,
+				"attached_to_name": doc.name,
+				"attached_to_doctype": doc.doctype,
+				"attached_to_field": df.fieldname,
+			},
+		):
+			continue
+
+		if is_attached_through_association(doc, value):
+			continue
+
+		unattached_file = frappe.db.exists(
+			"File",
+			{
+				"file_url": value,
+				"attached_to_name": None,
+				"attached_to_doctype": None,
+				"attached_to_field": None,
+				"owner": frappe.session.user,
+			},
+		)
+
+		if unattached_file:
+			frappe.db.set_value(
+				"File",
+				unattached_file,
+				field={
+					"attached_to_name": doc.name,
+					"attached_to_doctype": doc.doctype,
+					"attached_to_field": df.fieldname,
+					"is_private": cint(value.startswith("/private")),
+				},
+			)
+			continue
+
+		file = frappe.get_doc(
+			doctype="File",
+			file_url=value,
+			attached_to_name=doc.name,
+			attached_to_doctype=doc.doctype,
+			attached_to_field=df.fieldname,
+			folder="Home/Attachments",
+		)
+		try:
+			file.insert(ignore_permissions=True)
+		except Exception:
+			doc.log_error("Error Attaching File")
+
+
+file_utils.attach_files_to_document = patched_attach_files_to_document
